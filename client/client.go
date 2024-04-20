@@ -124,12 +124,60 @@ type User struct {
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdata.Username = username
+
+	hashedUsername := userlib.Hash([]byte(username))
+	if err != nil {
+		return &userdata, err
+	}
+
+	userUUID, err := uuid.FromBytes(hashedUsername[:16])
+	if err != nil {
+		return &userdata, err
+	}
+
+	// check if username is empty string
+	if username == "" {
+		return &userdata, err
+	}
+	// check if UUID already exists in datastore
+	if _, ok := userlib.DatastoreGet(userUUID); !ok {
+		return &userdata, err
+	}
+
+	userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
+	userEncKey, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
+	if err != nil {
+		return &userdata, err
+	}
+
+	userMacKey, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
+	if err != nil {
+		return &userdata, err
+	}
+
+	marshaledBytes, err := json.Marshal(userdata)
+	if err != nil {
+		return &userdata, err
+	}
+
+	ciphertext := userlib.SymEnc(userEncKey, userlib.RandomBytes(16), marshaledBytes)
+
+	ciphertextPlusMAC, err := userlib.HMACEval(userMacKey, ciphertext)
+	if err != nil {
+		return &userdata, err
+	}
+
+	userlib.DatastoreSet(userUUID, append(ciphertext, ciphertextPlusMAC...))
+
+	// (encrypted marshaled struct, MAC of encrypted marshaled struct)
+	// userlib.DatastoreSet(userUUID, marshalBytes)
 	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
+	// decrypt attempt every time to see if it matches
 	return userdataptr, nil
 }
 

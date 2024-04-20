@@ -12,18 +12,18 @@ To test your implementation, run `go test -v` inside of the `client_test` direct
 
 Fill in this section with the student IDs of all the members in your project group.
 
-Partner 1 Name:
+Partner 1 Name: John Glen Siy
 
-Partner 1 SID:
+Partner 1 SID: 3036909952
 
-Partner 1 Email:
+Partner 1 Email: johnglen_siy@berkeley.edu
 
-Partner 2 Name (if applicable):
+Partner 2 Name (if applicable): Cynthia Lan
 
-Partner 2 SID (if applicable):
+Partner 2 SID (if applicable): 3035850583
 
-Partner 2 Email (if applicable):
+Partner 2 Email (if applicable): cynthialan@berkeley.edu
 
 Also add a link to this repo below (should start with https://github.com/cs161-students/).
 
-Link to this Github repo:
+Link to this Github repo: https://github.com/cs161-students/sp24-proj2-161-john-cynthia.git
