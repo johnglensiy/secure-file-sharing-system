@@ -14,13 +14,13 @@ Fill in this section with the student IDs of all the members in your project gro
 
 Partner 1 Name: John Glen Siy
 
-Partner 1 SID: 3036909952
+Partner 1 SID:3036909952
 
 Partner 1 Email: johnglen_siy@berkeley.edu
 
 Partner 2 Name (if applicable): Cynthia Lan
 
-Partner 2 SID (if applicable): 3035850583
+Partner 2 SID (if applicable):3035850583
 
 Partner 2 Email (if applicable): cynthialan@berkeley.edu
 
