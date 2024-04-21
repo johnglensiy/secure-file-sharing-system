@@ -140,19 +140,19 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		return &userdata, err
 	}
 	// check if UUID already exists in datastore
-	if _, ok := userlib.DatastoreGet(userUUID); !ok {
+	if _, ok := userlib.DatastoreGet(userUUID); ok {
 		return &userdata, err
 	}
 
 	userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
-	userEncKey, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
+	userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
 	if err != nil {
 		return &userdata, err
 	}
 
-	userMacKey, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
+	userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
 	if err != nil {
-		return &userdata, err
+		return &userdata, errors.New("Encryption failed")
 	}
 
 	marshaledBytes, err := json.Marshal(userdata)
@@ -160,9 +160,12 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		return &userdata, err
 	}
 
-	ciphertext := userlib.SymEnc(userEncKey, userlib.RandomBytes(16), marshaledBytes)
+	ciphertext := userlib.SymEnc(userEncKeyUnsliced[:16], userlib.RandomBytes(16), marshaledBytes)
+	if err != nil {
+		return &userdata, err
+	}
 
-	ciphertextMAC, err := userlib.HMACEval(userMacKey, ciphertext)
+	ciphertextMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
 	if err != nil {
 		return &userdata, err
 	}
@@ -171,7 +174,6 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	// an HMAC tag is 64 bytes
 
 	// (encrypted marshaled struct, MAC of encrypted marshaled struct)
-	// userlib.DatastoreSet(userUUID, marshalBytes)
 	return &userdata, nil
 }
 
@@ -179,15 +181,15 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	// hashedUsername := userlib.Hash([]byte(username))
-	// if err != nil {
-	// 	return &userdata, err
-	// }
+	hashedUsername := userlib.Hash([]byte(username))
+	if err != nil {
+		return &userdata, err
+	}
 
-	// userUUID, err := uuid.FromBytes(hashedUsername[:16])
-	// if err != nil {
-	// 	return &userdata, err
-	// }
+	userUUID, err := uuid.FromBytes(hashedUsername[:16])
+	if err != nil {
+		return &userdata, err
+	}
 
 	// check if username is empty string
 	if username == "" {
@@ -195,35 +197,35 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// check if UUID DOESN'T exist in datastore
-	// ciphertextPlusMAC, ok := userlib.DatastoreGet(userUUID)
-	// if !ok {
-	// 	return &userdata, err
-	// }
+	ciphertextPlusMAC, ok := userlib.DatastoreGet(userUUID)
+	if !ok {
+		return &userdata, err
+	}
 
-	// userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
-	// userEncKey, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
-	// if err != nil {
-	// 	return &userdata, err
-	// }
+	userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
+	userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
+	if err != nil {
+		return &userdata, err
+	}
 
-	// userMacKey, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
-	// if err != nil {
-	// 	return &userdata, err
-	// }
+	userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
+	if err != nil {
+		return &userdata, err
+	}
 
-	// ciphertext := ciphertextPlusMAC[0 : len(ciphertextPlusMAC)-64]
-	// ciphertextMAC := ciphertextPlusMAC[64:]
+	ciphertext := ciphertextPlusMAC[0 : len(ciphertextPlusMAC)-64]
+	ciphertextMAC := ciphertextPlusMAC[64:]
 
-	// checkingMAC, err := userlib.HMACEval(userMacKey, ciphertext)
-	// if err != nil {
-	// 	return &userdata, err
-	// }
+	confirmationMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
+	if err != nil {
+		return &userdata, err
+	}
 
-	// if !userlib.HMACEqual(checkingMAC, ciphertextMAC) {
-	// 	return &userdata, err
-	// }
+	if !userlib.HMACEqual(confirmationMAC, ciphertextMAC) {
+		return &userdata, err
+	}
 
-	//json.Unmarshal(userlib.SymDec(userEncKey, ciphertext), userdataptr)
+	json.Unmarshal(userlib.SymDec(userEncKeyUnsliced, ciphertext), userdataptr)
 
 	return userdataptr, nil
 }
