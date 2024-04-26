@@ -110,6 +110,7 @@ func someUsefulThings() {
 // (e.g. like the Username attribute) and methods (e.g. like the StoreFile method below).
 type User struct {
 	Username string
+	Password string
 
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -119,128 +120,226 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
+// HELPER FUNCTIONS //
+
+func SymmetricKeyGenFromSourceKey(sourceKey []byte, purpose string) (derivedEncKey []byte, derivedMacKey []byte, err error) {
+
+	derivedEncKey, err = userlib.HashKDF(sourceKey, []byte("symmetric ENC key for"+purpose))
+	if err != nil {
+		return nil, nil, errors.New("symmetric ENC key generation failed")
+	}
+
+	derivedMacKey, err = userlib.HashKDF(sourceKey, []byte("symetric MAC key for"+purpose))
+	if err != nil {
+		return nil, nil, errors.New("symmetric MAC key generation failed")
+	}
+
+	//userlib.DebugMsg("Keys are", derivedEncKey, derivedMacKey)
+	return derivedEncKey, derivedMacKey, nil
+}
+
+func SymmetricEncryptAndTag(sourceKey []byte, purpose string, contentBytes []byte) (ciphertext []byte, tag []byte, err error) {
+
+	// FOR DEBUGGING - ensure that inputs are the same for determinism
+	// userlib.DebugMsg("Dec key is; %v", decKeyUnsliced[:16])
+	// userlib.DebugMsg("Mac key is: %v", macKeyUnsliced[:16])
+	// userlib.DebugMsg("Ciphertext is: %v", ciphertext)
+	// userlib.DebugMsg("Tag is: %v", tag)
+	// userlib.DebugMsg("Beginning encryption and tagging!")
+
+	encKeyUnsliced, macKeyUnsliced, err := SymmetricKeyGenFromSourceKey(sourceKey, purpose)
+	if err != nil {
+		return nil, nil, errors.New("symmetric key generation failed")
+	}
+
+	ciphertext = userlib.SymEnc(encKeyUnsliced[:16], userlib.RandomBytes(16), contentBytes)
+
+	tag, err = userlib.HMACEval(macKeyUnsliced[:16], ciphertext)
+	if err != nil {
+		return nil, nil, errors.New("MAC tag generation failed")
+	}
+
+	return ciphertext, tag, nil
+}
+
+func SymmetricTagAndDecrypt(sourceKey []byte, purpose string, ciphertext []byte, tag []byte) (contentBytes []byte, err error) {
+
+	// FOR DEBUGGING - ensure that inputs are the same for determinism
+	// userlib.DebugMsg("Dec key is; %v", decKeyUnsliced[:16])
+	// userlib.DebugMsg("Mac key is: %v", macKeyUnsliced[:16])
+	// userlib.DebugMsg("Ciphertext is: %v", ciphertext)
+	// userlib.DebugMsg("Tag is: %v", tag)
+	// userlib.DebugMsg("Beginning tag check and decryption!")
+
+	decKeyUnsliced, macKeyUnsliced, err := SymmetricKeyGenFromSourceKey(sourceKey, purpose)
+	if err != nil {
+		userlib.DebugMsg("Key gen failed")
+		return nil, err
+	}
+
+	confirmationTag, err := userlib.HMACEval(macKeyUnsliced[:16], ciphertext)
+	if err != nil {
+		userlib.DebugMsg("MAC confirmation tag generation failed")
+		return nil, errors.New("MAC confirmation tag generation failed")
+	}
+
+	if !userlib.HMACEqual(confirmationTag, tag) {
+		userlib.DebugMsg("not matching")
+		return nil, errors.New("MACs do not match - tampering detected")
+	}
+
+	contentBytes = userlib.SymDec(decKeyUnsliced[:16], ciphertext)
+
+	return contentBytes, nil
+}
+
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
+	var userSourceKey []byte
+	var userUUID uuid.UUID
+	var datastoreContent []byte
 	userdata.Username = username
-
-	hashedUsername := userlib.Hash([]byte(username))
-	if err != nil {
-		return &userdata, err
-	}
-
-	userUUID, err := uuid.FromBytes(hashedUsername[:16])
-	if err != nil {
-		return &userdata, err
-	}
 
 	// check if username is empty string
 	if username == "" {
 		return &userdata, err
 	}
+
+	// hash username and convert to UUID
+	userUUID, err = uuid.FromBytes(userlib.Hash([]byte(username))[:16])
+	if err != nil {
+		return &userdata, err
+	}
+
 	// check if UUID already exists in datastore
 	if _, ok := userlib.DatastoreGet(userUUID); ok {
 		return &userdata, err
 	}
 
-	userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
-	userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
+	// prepare source key and datastore content for encryption
+	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
+	datastoreContent, err = json.Marshal(userdata)
 	if err != nil {
 		return &userdata, err
 	}
 
-	userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
-	if err != nil {
-		return &userdata, errors.New("Encryption failed")
-	}
-
-	marshaledBytes, err := json.Marshal(userdata)
-	if err != nil {
-		return &userdata, err
-	}
-
-	ciphertext := userlib.SymEnc(userEncKeyUnsliced[:16], userlib.RandomBytes(16), marshaledBytes)
-	if err != nil {
-		return &userdata, err
-	}
-
-	ciphertextMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
+	// datastore content is encrypted
+	ciphertext, ciphertextMAC, err := SymmetricEncryptAndTag(userSourceKey, "storing user structs", datastoreContent)
 	if err != nil {
 		return &userdata, err
 	}
 
 	userlib.DatastoreSet(userUUID, append(ciphertext, ciphertextMAC...))
-	// an HMAC tag is 64 bytes
 
-	// (encrypted marshaled struct, MAC of encrypted marshaled struct)
 	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
+	var userSourceKey []byte
+	var userUUID uuid.UUID
+	var ciphertextPlusMac []byte
 	userdataptr = &userdata
-
-	hashedUsername := userlib.Hash([]byte(username))
-	if err != nil {
-		return &userdata, err
-	}
-
-	userUUID, err := uuid.FromBytes(hashedUsername[:16])
-	if err != nil {
-		return &userdata, err
-	}
 
 	// check if username is empty string
 	if username == "" {
+		return &userdata, errors.New("username is empty string")
+	}
+
+	// hash username and convert to UUID
+	userUUID, err = uuid.FromBytes(userlib.Hash([]byte(username))[:16])
+	if err != nil {
 		return &userdata, err
 	}
 
-	// check if UUID DOESN'T exist in datastore
-	ciphertextPlusMAC, ok := userlib.DatastoreGet(userUUID)
+	// fetch user struct from datastore and parse it
+	ciphertextPlusMac, ok := userlib.DatastoreGet(userUUID)
 	if !ok {
 		return &userdata, err
 	}
+	ciphertext := ciphertextPlusMac[0 : len(ciphertextPlusMac)-64]
+	ciphertextMac := ciphertextPlusMac[len(ciphertextPlusMac)-64:]
 
-	userSourceKey := userlib.Argon2Key([]byte(password), []byte(username), 16)
-	userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for user structs"))
+	// generate decryption keys on the fly
+	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
+
+	// check tag and decrypt fetched user struct from datastore
+	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing user structs", ciphertext, ciphertextMac)
 	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
 		return &userdata, err
 	}
 
-	userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user structs"))
-	if err != nil {
-		return &userdata, err
-	}
-
-	ciphertext := ciphertextPlusMAC[0 : len(ciphertextPlusMAC)-64]
-	ciphertextMAC := ciphertextPlusMAC[64:]
-
-	confirmationMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
-	if err != nil {
-		return &userdata, err
-	}
-
-	if !userlib.HMACEqual(confirmationMAC, ciphertextMAC) {
-		return &userdata, err
-	}
-
-	json.Unmarshal(userlib.SymDec(userEncKeyUnsliced, ciphertext), userdataptr)
+	// unmarshal decrypted bytes
+	json.Unmarshal(contentBytes, userdataptr)
 
 	return userdataptr, nil
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	if err != nil {
-		return err
-	}
-	contentBytes, err := json.Marshal(content)
-	if err != nil {
-		return err
-	}
-	userlib.DatastoreSet(storageKey, contentBytes)
-	return
+	// storageUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	// // storageKey is not a key! key as in UUID for the datastore
+	// if err != nil {
+	// 	return err
+	// }
+	// contentBytes, err := json.Marshal(content)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// // generate encryption and MAC keys for file blobs
+	// userSourceKey := userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
+	// userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for files"))
+	// if err != nil {
+	// 	return err
+	// }
+	// userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user files"))
+	// if err != nil {
+	// 	return err
+	// }
+
+	// // generate ciphertext and tag to store at storageUUID
+	// ciphertext := userlib.SymEnc(userEncKeyUnsliced[:16], userlib.RandomBytes(16), contentBytes)
+	// if err != nil {
+	// 	return err
+	// }
+	// ciphertextMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// userlib.DatastoreSet(storageUUID, append(ciphertext, ciphertextMAC...))
+
+	// // once file is stored, reset num appends to 0
+	// // generate encryption and MAC keys for numappends
+	// numAppendsUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + "num appends"))[:16])
+	// if err != nil {
+	// 	return err
+	// }
+
+	// numAppendsEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for num appends"))
+	// if err != nil {
+	// 	return err
+	// }
+	// numAppendsMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for num appends"))
+	// if err != nil {
+	// 	return err
+	// }
+
+	// ciphertext = userlib.SymEnc(numAppendsEncKeyUnsliced[:16], userlib.RandomBytes(16), contentBytes)
+	// if err != nil {
+	// 	return err
+	// }
+	// ciphertextMAC, err = userlib.HMACEval(numAppendsMacKeyUnsliced[:16], ciphertext)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// userlib.DatastoreSet(numAppendsUUID, append(ciphertext, ciphertextMAC...))
+
+	return nil
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
@@ -256,6 +355,27 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	if !ok {
 		return nil, errors.New(strings.ToTitle("file not found"))
 	}
+
+	// // get number of file appends from numappends UUID
+	// numAppendsUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + "num appends"))[:16])
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// numAppends, ok := userlib.DatastoreGet(numAppendsUUID)
+	// if !ok {
+	// 	return errors.New("no number of appends")
+	// }
+
+	// // decrypt and check NUMBER OF APPENDS struct for tampering
+
+	// // for number of file appends
+	// // 		load in file blob and append contents to dataJSON
+	// for count := 0; count < numAppends; count++ {
+	// 	thisFileBlob :=
+	// 	dataJSON = append(dataJSON, something)
+	// }
+
 	err = json.Unmarshal(dataJSON, &content)
 	return content, err
 }

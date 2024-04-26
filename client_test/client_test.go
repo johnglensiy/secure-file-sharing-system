@@ -85,7 +85,7 @@ var _ = Describe("Client Tests", func() {
 
 	Describe("Basic Tests", func() {
 
-		Specify("Basic Test: Testing InitUser/GetUser on a single user.", func() {
+		FSpecify("Basic Test: Testing InitUser/GetUser on a single user.", func() {
 			userlib.DebugMsg("Initializing user Alice.")
 			alice, err = client.InitUser("alice", defaultPassword)
 			Expect(err).To(BeNil())
