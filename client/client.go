@@ -32,7 +32,7 @@ import (
 	"errors"
 
 	// Optional.
-	_ "strconv"
+	"strconv"
 )
 
 // This serves two purposes: it shows you a few useful primitives,
@@ -111,7 +111,9 @@ func someUsefulThings() {
 type User struct {
 	Username string
 	Password string
-
+	//map[KeyType]ValueType
+	OwnedFilesDirLoc    uuid.UUID
+	ReceivedFilesDirLoc uuid.UUID
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
 	// On the flipside, if you have an attribute that you want to be able to access from
@@ -120,7 +122,17 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
+type FileMetadata struct {
+	FileLocation  userlib.UUID
+	FileSourceKey []byte
+	NumAppends    int
+}
+
 // HELPER FUNCTIONS //
+
+func IntToByteArray(integer int) []byte {
+	return []byte(strconv.Itoa(integer))
+}
 
 func SymmetricKeyGenFromSourceKey(sourceKey []byte, purpose string) (derivedEncKey []byte, derivedMacKey []byte, err error) {
 
@@ -129,7 +141,7 @@ func SymmetricKeyGenFromSourceKey(sourceKey []byte, purpose string) (derivedEncK
 		return nil, nil, errors.New("symmetric ENC key generation failed")
 	}
 
-	derivedMacKey, err = userlib.HashKDF(sourceKey, []byte("symetric MAC key for"+purpose))
+	derivedMacKey, err = userlib.HashKDF(sourceKey, []byte("symmetric MAC key for"+purpose))
 	if err != nil {
 		return nil, nil, errors.New("symmetric MAC key generation failed")
 	}
@@ -172,6 +184,7 @@ func SymmetricTagAndDecrypt(sourceKey []byte, purpose string, ciphertext []byte,
 	// userlib.DebugMsg("Beginning tag check and decryption!")
 
 	decKeyUnsliced, macKeyUnsliced, err := SymmetricKeyGenFromSourceKey(sourceKey, purpose)
+	//userlib.DebugMsg("keys are %v, %v", decKeyUnsliced, macKeyUnsliced)
 	if err != nil {
 		userlib.DebugMsg("Key gen failed")
 		return nil, err
@@ -184,13 +197,24 @@ func SymmetricTagAndDecrypt(sourceKey []byte, purpose string, ciphertext []byte,
 	}
 
 	if !userlib.HMACEqual(confirmationTag, tag) {
-		userlib.DebugMsg("not matching")
+		userlib.DebugMsg("MACs do not match - tampering detected.")
 		return nil, errors.New("MACs do not match - tampering detected")
 	}
 
 	contentBytes = userlib.SymDec(decKeyUnsliced[:16], ciphertext)
 
 	return contentBytes, nil
+}
+
+func ParseCiphertextandTagFromDatastore(uuid uuid.UUID) (ciphertext []byte, tag []byte, err error) {
+	ciphertextPlusMac, ok := userlib.DatastoreGet(uuid)
+	if !ok {
+		userlib.DebugMsg("No data exists at this UUID.")
+		return nil, nil, err
+	}
+	ciphertext = ciphertextPlusMac[0 : len(ciphertextPlusMac)-64]
+	tag = ciphertextPlusMac[len(ciphertextPlusMac)-64:]
+	return ciphertext, tag, nil
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -200,12 +224,63 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userSourceKey []byte
 	var userUUID uuid.UUID
 	var datastoreContent []byte
+	var ownedFilesContent []byte
+	var receivedFilesContent []byte
 	userdata.Username = username
+	userdata.Password = password
 
 	// check if username is empty string
 	if username == "" {
 		return &userdata, err
 	}
+
+	// store owned and received files directory locations in datastore and in local memory
+	ownedFilesDirUUID, err := uuid.FromBytes(userlib.Hash([]byte(username + "owned files"))[:16])
+	if err != nil {
+		userlib.DebugMsg("ownedFilesDirUUID generation failed.")
+		return &userdata, err
+	}
+	receivedFilesDirUUID, err := uuid.FromBytes(userlib.Hash([]byte(username + "received files"))[:16])
+	if err != nil {
+		userlib.DebugMsg("receivedFilesDirUUID generation failed.")
+		return &userdata, err
+	}
+	userdata.OwnedFilesDirLoc = ownedFilesDirUUID
+	userdata.ReceivedFilesDirLoc = receivedFilesDirUUID
+	userlib.DebugMsg("received files directory is %v", userdata.ReceivedFilesDirLoc)
+
+	// symmetrically encrypt an empty map to each directory
+	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
+	userlib.DebugMsg("userSourceKey is %v", userSourceKey)
+	emptyFileDir := make(map[string]uuid.UUID)
+	ownedFilesContent, err = json.Marshal(emptyFileDir)
+	if err != nil {
+		userlib.DebugMsg("ownedFilesContent could not be marshaled.")
+		return &userdata, err
+	}
+	receivedFilesContent, err = json.Marshal(emptyFileDir)
+	if err != nil {
+		userlib.DebugMsg("receivedFilesContent could not be marshaled.")
+		return &userdata, err
+	}
+
+	ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC, err :=
+		SymmetricEncryptAndTag(userSourceKey, "storing owned files directory", ownedFilesContent)
+	//userlib.DebugMsg("ciphertext, ciphertextMac are %v, %v", ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC)
+	if err != nil {
+		userlib.DebugMsg("Symmetric encryption failed.")
+		return &userdata, err
+	}
+
+	receivedFilesDirCiphertext, receivedFilesDirCiphertextMAC, err :=
+		SymmetricEncryptAndTag(userSourceKey, "storing received files directory", receivedFilesContent)
+	//userlib.DebugMsg("ciphertext, ciphertextMac are %v, %v", ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC)
+	if err != nil {
+		userlib.DebugMsg("Symmetric encryption failed.")
+		return &userdata, err
+	}
+	userlib.DatastoreSet(ownedFilesDirUUID, append(ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC...))
+	userlib.DatastoreSet(receivedFilesDirUUID, append(receivedFilesDirCiphertext, receivedFilesDirCiphertextMAC...))
 
 	// hash username and convert to UUID
 	userUUID, err = uuid.FromBytes(userlib.Hash([]byte(username))[:16])
@@ -219,19 +294,18 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// prepare source key and datastore content for encryption
-	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
 	datastoreContent, err = json.Marshal(userdata)
 	if err != nil {
 		return &userdata, err
 	}
 
 	// datastore content is encrypted
-	ciphertext, ciphertextMAC, err := SymmetricEncryptAndTag(userSourceKey, "storing user structs", datastoreContent)
+	userStructCiphertext, userStructCiphertextMAC, err := SymmetricEncryptAndTag(userSourceKey, "storing user structs", datastoreContent)
 	if err != nil {
 		return &userdata, err
 	}
 
-	userlib.DatastoreSet(userUUID, append(ciphertext, ciphertextMAC...))
+	userlib.DatastoreSet(userUUID, append(userStructCiphertext, userStructCiphertextMAC...))
 
 	return &userdata, nil
 }
@@ -240,7 +314,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	var userSourceKey []byte
 	var userUUID uuid.UUID
-	var ciphertextPlusMac []byte
+	// var ciphertextPlusMac []byte
 	userdataptr = &userdata
 
 	// check if username is empty string
@@ -255,12 +329,11 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	}
 
 	// fetch user struct from datastore and parse it
-	ciphertextPlusMac, ok := userlib.DatastoreGet(userUUID)
-	if !ok {
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userUUID)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
 		return &userdata, err
 	}
-	ciphertext := ciphertextPlusMac[0 : len(ciphertextPlusMac)-64]
-	ciphertextMac := ciphertextPlusMac[len(ciphertextPlusMac)-64:]
 
 	// generate decryption keys on the fly
 	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
@@ -279,70 +352,233 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	// storageUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	// // storageKey is not a key! key as in UUID for the datastore
-	// if err != nil {
-	// 	return err
-	// }
-	// contentBytes, err := json.Marshal(content)
-	// if err != nil {
-	// 	return err
-	// }
+	var userSourceKey []byte
+	var ownedFilesDir map[string]uuid.UUID
+	var receivedFilesDir map[string]uuid.UUID
+	var fileMetadata FileMetadata
+	var fileMetadataUUID uuid.UUID
 
-	// // generate encryption and MAC keys for file blobs
-	// userSourceKey := userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
-	// userEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for files"))
-	// if err != nil {
-	// 	return err
-	// }
-	// userMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for user files"))
-	// if err != nil {
-	// 	return err
-	// }
+	// PROCEED only if file is not in received files dictionary
 
-	// // generate ciphertext and tag to store at storageUUID
-	// ciphertext := userlib.SymEnc(userEncKeyUnsliced[:16], userlib.RandomBytes(16), contentBytes)
-	// if err != nil {
-	// 	return err
-	// }
-	// ciphertextMAC, err := userlib.HMACEval(userMacKeyUnsliced[:16], ciphertext)
-	// if err != nil {
-	// 	return err
-	// }
+	// if file is not in owned files dictionary (never been initialized before and therefore has no metadata)
+	// -- encrypt an additional file metadata struct
+	// ---- generate random symmetric keys for initialized file
+	// ---- generate random UUID for file
+	// ---- set numAppends count to 0
+	// -- store file contents at a random UUID
+	// -- add to owned files dictionary (label: filename, value: location of file MD)
 
-	// userlib.DatastoreSet(storageUUID, append(ciphertext, ciphertextMAC...))
+	// if file IS in owned files dictionary (already been initialized and no need to encrypt metadata struct)
+	// -- go to filedata struct and set numAppends count to 0
+	// -- go to random UUID and set filecontents to input string
+	// -- reset all appends to empty strings
 
-	// // once file is stored, reset num appends to 0
-	// // generate encryption and MAC keys for numappends
-	// numAppendsUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + "num appends"))[:16])
-	// if err != nil {
-	// 	return err
-	// }
+	// fetch user struct from datastore and parse it
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
+	//userlib.DebugMsg("received files directory is %v", userdata.ReceivedFilesDirLoc)
+	//userlib.DebugMsg("ciphertext, ciphertextMac are %v, %v", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return err
+	}
+	//userlib.DebugMsg("username: %v, password: %v", userdata.Username, userdata.Password)
+	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
+	//userlib.DebugMsg("userSourceKey is: %v", userSourceKey)
 
-	// numAppendsEncKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym enc key for num appends"))
-	// if err != nil {
-	// 	return err
-	// }
-	// numAppendsMacKeyUnsliced, err := userlib.HashKDF(userSourceKey, []byte("sym mac key for num appends"))
-	// if err != nil {
-	// 	return err
-	// }
+	// check tag and decrypt fetched user struct from datastore
+	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return err
+	}
+	json.Unmarshal(contentBytes, &receivedFilesDir)
 
-	// ciphertext = userlib.SymEnc(numAppendsEncKeyUnsliced[:16], userlib.RandomBytes(16), contentBytes)
-	// if err != nil {
-	// 	return err
-	// }
-	// ciphertextMAC, err = userlib.HMACEval(numAppendsMacKeyUnsliced[:16], ciphertext)
-	// if err != nil {
-	// 	return err
-	// }
+	// check if file is already in received files directory
+	_, ok := receivedFilesDir[filename]
+	if ok {
+		userlib.DebugMsg("File already in received files directory.")
+		return errors.New("file already in received files directory")
+	}
 
-	// userlib.DatastoreSet(numAppendsUUID, append(ciphertext, ciphertextMAC...))
+	// fetch owned files directory from datastore
+	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return err
+	}
+	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return err
+	}
+	json.Unmarshal(contentBytes, &ownedFilesDir)
+
+	// check if file is already in owned files directory
+	fileMetadataUUID, ok = ownedFilesDir[filename]
+
+	// if doesn't exist in owned files, then create file metadata struct and store in owned files directory
+	if !ok {
+		fileMetadataUUID = uuid.New()
+		fileLocation := uuid.New()
+		fileSourceKey := userlib.RandomBytes(16)
+		fileNumAppends := 0
+
+		fileMetadata = FileMetadata{fileLocation, fileSourceKey, fileNumAppends}
+
+		ownedFilesDir[filename] = fileMetadataUUID
+		ownedFilesContent, err := json.Marshal(ownedFilesDir)
+		if err != nil {
+			userlib.DebugMsg("ownedFilesContent could not be marshaled.")
+			return err
+		}
+
+		ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC, err :=
+			SymmetricEncryptAndTag(userSourceKey, "storing owned files directory", ownedFilesContent)
+		if err != nil {
+			userlib.DebugMsg("Symmetric encryption failed.")
+			return err
+		}
+
+		userlib.DatastoreSet(fileMetadataUUID, append(ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC...))
+	} else {
+		// if file IS in owned files dictionary (already been initialized and no need to create metadata struct)
+		// -- go to filemetadata struct and set numAppends count to 0
+		// -- go to random UUID and set filecontents to input string
+		// -- reset all appends to empty strings
+		ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(userdata.OwnedFilesDirLoc)
+		if err != nil {
+			userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+			return err
+		}
+		contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+		if err != nil {
+			userlib.DebugMsg("Symmetric decryption failed.")
+			return err
+		}
+		json.Unmarshal(contentBytes, &fileMetadata)
+
+		fileUUID := fileMetadata.FileLocation
+		fileSourceKey := fileMetadata.FileSourceKey
+		// fileNumAppends := fileMetadata.NumAppends
+
+		fileContentCiphertext, fileContentCiphertextMac, err :=
+			SymmetricEncryptAndTag(fileSourceKey, "storing file contents", content)
+		if err != nil {
+			userlib.DebugMsg("Symmetric encryption failed.")
+			return err
+		}
+
+		userlib.DatastoreSet(fileUUID, append(fileContentCiphertext, fileContentCiphertextMac...))
+		// fileMetadata = FileMetadata{fileLocation, fileSourceKey, fileNumAppends}
+	}
+	// reset number of appends for file
+	fileMetadata.NumAppends = 0
+
+	// re-encrypt file metadata struct
+	fileMDContent, err := json.Marshal(fileMetadata)
+	if err != nil {
+		userlib.DebugMsg("fileMetadataContent could not be marshaled.")
+		return err
+	}
+
+	fileMDCiphertext, fileMDCiphertextMAC, err :=
+		SymmetricEncryptAndTag(userSourceKey, "storing file metadata", fileMDContent)
+	if err != nil {
+		userlib.DebugMsg("Symmetric encryption failed.")
+		return err
+	}
+
+	userlib.DatastoreSet(fileMetadataUUID, append(fileMDCiphertext, fileMDCiphertextMAC...))
 
 	return nil
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+	var userSourceKey []byte
+	var ownedFilesDir map[string]uuid.UUID
+	var receivedFilesDir map[string]uuid.UUID
+	var fileMetadataUUID uuid.UUID
+	var fileMetadata FileMetadata
+
+	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
+	// fetch received files directory from datastore
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return err
+	}
+
+	// check tag and decrypt from datastore
+	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return err
+	}
+	json.Unmarshal(contentBytes, &receivedFilesDir)
+
+	// fetch owned files directory from datastore
+	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return err
+	}
+
+	// check tag and decrypt from datastore
+	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return err
+	}
+	json.Unmarshal(contentBytes, &ownedFilesDir)
+
+	// check if filename is in namespace
+	_, inReceivedFilesDir := receivedFilesDir[filename]
+	_, inOwnedFilesDir := ownedFilesDir[filename]
+	if !inReceivedFilesDir && !inOwnedFilesDir {
+		userlib.DebugMsg("Filename not in namespace.")
+		return err
+	} else if inReceivedFilesDir {
+		fileMetadataUUID = receivedFilesDir[filename]
+	} else if inOwnedFilesDir {
+		fileMetadataUUID = ownedFilesDir[filename]
+	}
+
+	// access file metadata and increment number of appends
+	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(fileMetadataUUID)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return err
+	}
+	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing file metadata", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return err
+	}
+	json.Unmarshal(contentBytes, &fileMetadata)
+
+	fileMetadata.NumAppends += 1
+
+	// hash fileUUID with number of appends to get unique UUID
+	fileLocation := fileMetadata.FileLocation
+	numAppends := IntToByteArray(fileMetadata.NumAppends)
+	fileAppendUUID, err := uuid.FromBytes(userlib.Hash(append(fileLocation[:], numAppends...))[:16])
+	if err != nil {
+		userlib.DebugMsg("fileUUID generation failed.")
+		return err
+	}
+
+	// encrypt content at fileUUID using fileSourceKey
+	fileSourceKey := fileMetadata.FileSourceKey
+
+	fileContentCiphertext, fileContentCiphertextMac, err :=
+		SymmetricEncryptAndTag(fileSourceKey, "storing file contents", content)
+	if err != nil {
+		userlib.DebugMsg("Symmetric encryption failed.")
+		return err
+	}
+
+	userlib.DatastoreSet(fileAppendUUID, append(fileContentCiphertext, fileContentCiphertextMac...))
+
 	return nil
 }
 
@@ -355,26 +591,6 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	if !ok {
 		return nil, errors.New(strings.ToTitle("file not found"))
 	}
-
-	// // get number of file appends from numappends UUID
-	// numAppendsUUID, err := uuid.FromBytes(userlib.Hash([]byte(filename + "num appends"))[:16])
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// numAppends, ok := userlib.DatastoreGet(numAppendsUUID)
-	// if !ok {
-	// 	return errors.New("no number of appends")
-	// }
-
-	// // decrypt and check NUMBER OF APPENDS struct for tampering
-
-	// // for number of file appends
-	// // 		load in file blob and append contents to dataJSON
-	// for count := 0; count < numAppends; count++ {
-	// 	thisFileBlob :=
-	// 	dataJSON = append(dataJSON, something)
-	// }
 
 	err = json.Unmarshal(dataJSON, &content)
 	return content, err
