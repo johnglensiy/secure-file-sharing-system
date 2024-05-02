@@ -60,7 +60,7 @@ var _ = Describe("Client Unit Tests", func() {
 			// struct fields because not all implementations will have a username field.
 			Expect(alice.Username).To(Equal("alice"))
 		})
-		FSpecify("Basic Test: Check that file for StoreFile is not in received files directory", func() {
+		Specify("Basic Test: Check that file for StoreFile is not in received files directory", func() {
 			userlib.DebugMsg("Initializing user Alice.")
 			alice, err := InitUser("alice", "password")
 			Expect(err).To(BeNil())

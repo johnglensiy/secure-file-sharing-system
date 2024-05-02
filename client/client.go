@@ -134,7 +134,43 @@ func IntToByteArray(integer int) []byte {
 	return []byte(strconv.Itoa(integer))
 }
 
-func PrintUserNamespace() {
+func DecryptFileDirectories(userSourceKey []byte, ownedFilesDirLoc uuid.UUID, receivedFilesDirLoc uuid.UUID) (ownedFilesDir map[string]uuid.UUID, receivedFilesDir map[string]uuid.UUID, err error) {
+
+	// fetch received files directory from datastore
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(receivedFilesDirLoc)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return nil, nil, err
+	}
+
+	// check tag and decrypt from datastore
+	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return nil, nil, err
+	}
+	json.Unmarshal(contentBytes, &receivedFilesDir)
+	userlib.DebugMsg("received files directory: %v", receivedFilesDir)
+
+	// fetch owned files directory from datastore
+	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((ownedFilesDirLoc))
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return nil, nil, err
+	}
+
+	// check tag and decrypt from datastore
+	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return nil, nil, err
+	}
+	json.Unmarshal(contentBytes, &ownedFilesDir)
+	userlib.DebugMsg("owned files directory: %v", ownedFilesDir)
+	return ownedFilesDir, receivedFilesDir, nil
+}
+
+func CheckForFileInUserNamespace() {
 
 }
 
@@ -633,36 +669,37 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 
 	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
 	// fetch received files directory from datastore
-	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
-	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-		return nil, err
-	}
+	// ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
+	// if err != nil {
+	// 	userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+	// 	return nil, err
+	// }
 
-	// check tag and decrypt from datastore
-	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
-		return nil, err
-	}
-	json.Unmarshal(contentBytes, &receivedFilesDir)
+	// // check tag and decrypt from datastore
+	// contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
+	// if err != nil {
+	// 	userlib.DebugMsg("Symmetric decryption failed.")
+	// 	return nil, err
+	// }
+	// json.Unmarshal(contentBytes, &receivedFilesDir)
 
-	userlib.DebugMsg("received files directory: %v", receivedFilesDir)
-	// fetch owned files directory from datastore
-	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
-	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-		return nil, err
-	}
+	// userlib.DebugMsg("received files directory: %v", receivedFilesDir)
+	// // fetch owned files directory from datastore
+	// ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
+	// if err != nil {
+	// 	userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+	// 	return nil, err
+	// }
 
-	// check tag and decrypt from datastore
-	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
-		return nil, err
-	}
-	json.Unmarshal(contentBytes, &ownedFilesDir)
-	userlib.DebugMsg("owned files directory: %v", ownedFilesDir)
+	// // check tag and decrypt from datastore
+	// contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+	// if err != nil {
+	// 	userlib.DebugMsg("Symmetric decryption failed.")
+	// 	return nil, err
+	// }
+	// json.Unmarshal(contentBytes, &ownedFilesDir)
+	// userlib.DebugMsg("owned files directory: %v", ownedFilesDir)
+	ownedFilesDir, receivedFilesDir, err = DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
 
 	// check if filename is in namespace
 	_, inReceivedFilesDir := receivedFilesDir[filename]
@@ -677,12 +714,12 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	}
 
 	// access file metadata and symmetric keys for decryption
-	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(fileMetadataUUID)
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(fileMetadataUUID)
 	if err != nil {
 		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
 		return nil, err
 	}
-	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing file metadata", ciphertext, ciphertextMac)
+	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing file metadata", ciphertext, ciphertextMac)
 	if err != nil {
 		userlib.DebugMsg("Symmetric decryption failed.")
 		return nil, err
@@ -719,7 +756,6 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 			userlib.DebugMsg("fileUUID generation failed.")
 			return nil, err
 		}
-
 		ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(fileAppendUUID)
 		if err != nil {
 			userlib.DebugMsg("Fetching ciphertext from datastore failed.")
