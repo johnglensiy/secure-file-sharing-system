@@ -114,6 +114,8 @@ type User struct {
 	//map[KeyType]ValueType
 	OwnedFilesDirLoc    uuid.UUID
 	ReceivedFilesDirLoc uuid.UUID
+	UserPrivateKey      userlib.PKEDecKey
+	UserSignKey         userlib.DSSignKey
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
 	// On the flipside, if you have an attribute that you want to be able to access from
@@ -123,9 +125,22 @@ type User struct {
 }
 
 type FileMetadata struct {
-	FileLocation  userlib.UUID
-	FileSourceKey []byte
-	NumAppends    int
+	FileLocation     userlib.UUID
+	FileSourceKey    []byte
+	NumAppends       int
+	SharedRecipients []string
+}
+
+// type Invitation struct {
+// 	FileMDLocation userlib.UUID
+// 	FileMDEncKey   []byte
+// 	FileMDMacKey   []byte
+// 	InviteAccepted bool
+// }
+
+type FileDirectoryContent struct {
+	FileMDLocation  userlib.UUID
+	FileMDSourceKey []byte
 }
 
 // HELPER FUNCTIONS //
@@ -134,7 +149,7 @@ func IntToByteArray(integer int) []byte {
 	return []byte(strconv.Itoa(integer))
 }
 
-func DecryptFileDirectories(userSourceKey []byte, ownedFilesDirLoc uuid.UUID, receivedFilesDirLoc uuid.UUID) (ownedFilesDir map[string]uuid.UUID, receivedFilesDir map[string]uuid.UUID, err error) {
+func DecryptFileDirectories(userSourceKey []byte, ownedFilesDirLoc uuid.UUID, receivedFilesDirLoc uuid.UUID) (ownedFilesDir map[string]FileDirectoryContent, receivedFilesDir map[string]FileDirectoryContent, err error) {
 
 	// fetch received files directory from datastore
 	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(receivedFilesDirLoc)
@@ -168,10 +183,6 @@ func DecryptFileDirectories(userSourceKey []byte, ownedFilesDirLoc uuid.UUID, re
 	json.Unmarshal(contentBytes, &ownedFilesDir)
 	userlib.DebugMsg("owned files directory: %v", ownedFilesDir)
 	return ownedFilesDir, receivedFilesDir, nil
-}
-
-func CheckForFileInUserNamespace() {
-
 }
 
 func SymmetricKeyGenFromSourceKey(sourceKey []byte, purpose string) (derivedEncKey []byte, derivedMacKey []byte, err error) {
@@ -246,6 +257,39 @@ func SymmetricTagAndDecrypt(sourceKey []byte, purpose string, ciphertext []byte,
 	return contentBytes, nil
 }
 
+func AsymmetricEncryptAndSign(encKey userlib.PKEEncKey, signKey userlib.DSSignKey, contentBytes []byte) (ciphertext []byte, signature []byte, err error) {
+
+	ciphertext, err = userlib.PKEEnc(encKey, contentBytes)
+	if err != nil {
+		userlib.DebugMsg("Asymmetric encryption failed")
+		return nil, nil, err
+	}
+
+	signature, err = userlib.DSSign(signKey, ciphertext)
+	if err != nil {
+		userlib.DebugMsg("Signature generation failed")
+		return nil, nil, err
+	}
+
+	return ciphertext, signature, err
+}
+
+func AsymmetricVerifyAndDecrypt(decKey userlib.PKEDecKey, verifyKey userlib.DSVerifyKey, ciphertext []byte, signature []byte) (contentBytes []byte, err error) {
+
+	err = userlib.DSVerify(verifyKey, ciphertext, signature)
+	if err != nil {
+		userlib.DebugMsg("Signature is invalid.")
+		return nil, err
+	}
+	contentBytes, err = userlib.PKEDec(decKey, ciphertext)
+	if err != nil {
+		userlib.DebugMsg("Asymmetric decryption failed.")
+		return nil, err
+	}
+	return contentBytes, nil
+
+}
+
 func ParseCiphertextandTagFromDatastore(uuid uuid.UUID) (ciphertext []byte, tag []byte, err error) {
 	ciphertextPlusMac, ok := userlib.DatastoreGet(uuid)
 	if !ok {
@@ -266,11 +310,40 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var datastoreContent []byte
 	var ownedFilesContent []byte
 	var receivedFilesContent []byte
+	// var userPrivateKey userlib.PKEDecKey
+	var userPublicKey userlib.PKEEncKey
+	// var userSignKey userlib.DSSignKey
+	var userVerifyKey userlib.DSVerifyKey
 	userdata.Username = username
 	userdata.Password = password
 
 	// check if username is empty string
 	if username == "" {
+		return &userdata, err
+	}
+
+	// generate public key encryption pairs
+	userPublicKey, userdata.UserPrivateKey, err = userlib.PKEKeyGen()
+	if err != nil {
+		userlib.DebugMsg("Key generation failed")
+		return &userdata, err
+	}
+
+	err = userlib.KeystoreSet(username+"public key", userPublicKey)
+	if err != nil {
+		userlib.DebugMsg("KeystoreSet failed.")
+		return &userdata, err
+	}
+
+	userdata.UserSignKey, userVerifyKey, err = userlib.DSKeyGen()
+	if err != nil {
+		userlib.DebugMsg("Key generation failed")
+		return &userdata, err
+	}
+
+	err = userlib.KeystoreSet(username+"verify key", userVerifyKey)
+	if err != nil {
+		userlib.DebugMsg("KeystoreSet failed.")
 		return &userdata, err
 	}
 
@@ -287,12 +360,12 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	}
 	userdata.OwnedFilesDirLoc = ownedFilesDirUUID
 	userdata.ReceivedFilesDirLoc = receivedFilesDirUUID
-	userlib.DebugMsg("received files directory is %v", userdata.ReceivedFilesDirLoc)
+	//userlib.DebugMsg("received files directory is %v", userdata.ReceivedFilesDirLoc)
 
 	// symmetrically encrypt an empty map to each directory
 	userSourceKey = userlib.Argon2Key([]byte(password), []byte(username), 16)
-	// userlib.DebugMsg("userSourceKey is %v", userSourceKey)
-	emptyFileDir := make(map[string]uuid.UUID)
+
+	emptyFileDir := make(map[string]FileDirectoryContent)
 	ownedFilesContent, err = json.Marshal(emptyFileDir)
 	if err != nil {
 		userlib.DebugMsg("ownedFilesContent could not be marshaled.")
@@ -393,10 +466,12 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	var userSourceKey []byte
-	var ownedFilesDir map[string]uuid.UUID
-	var receivedFilesDir map[string]uuid.UUID
+	var ownedFilesDir map[string]FileDirectoryContent
+	var receivedFilesDir map[string]FileDirectoryContent
 	var fileMetadata FileMetadata
 	var fileMetadataUUID uuid.UUID
+	var fileDirectoryContent FileDirectoryContent
+	var fileMDSourceKey []byte = userlib.RandomBytes(16)
 
 	// PROCEED only if file is not in received files dictionary
 
@@ -406,55 +481,31 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	// ---- generate random UUID for file
 	// ---- set numAppends count to 0
 	// -- store file contents at a random UUID
-	// -- add to owned files dictionary (label: filename, value: location of file MD)
+	// -- add to owned files dictionary (label: filename, value: location of file MD, sym keys for decryption)
 
 	// if file IS in owned files dictionary (already been initialized and no need to encrypt metadata struct)
 	// -- go to filedata struct and set numAppends count to 0
 	// -- go to random UUID and set filecontents to input string
 	// -- reset all appends to empty strings
 
-	// fetch user struct from datastore and parse it
-	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
-	//userlib.DebugMsg("received files directory is %v", userdata.ReceivedFilesDirLoc)
-	//userlib.DebugMsg("ciphertext, ciphertextMac are %v, %v", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-		return err
-	}
 	//userlib.DebugMsg("username: %v, password: %v", userdata.Username, userdata.Password)
 	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
 	//userlib.DebugMsg("userSourceKey is: %v", userSourceKey)
 
-	// check tag and decrypt fetched user struct from datastore
-	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
+	ownedFilesDir, receivedFilesDir, err =
+		DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
 	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
+		userlib.DebugMsg("Could not fetch file directories")
 		return err
 	}
-	json.Unmarshal(contentBytes, &receivedFilesDir)
 
-	// check if file is already in received files directory
-	_, ok := receivedFilesDir[filename]
-	if ok {
+	if _, ok := receivedFilesDir[filename]; ok {
 		userlib.DebugMsg("File already in received files directory.")
 		return errors.New("file already in received files directory")
 	}
-
-	// fetch owned files directory from datastore
-	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
-	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-		return err
-	}
-	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
-		return err
-	}
-	json.Unmarshal(contentBytes, &ownedFilesDir)
-
-	// check if file is already in owned files directory
-	fileMetadataUUID, ok = ownedFilesDir[filename]
+	// check for file in owned files directory
+	fileDirectoryContent, ok := ownedFilesDir[filename]
+	fileMetadataUUID = fileDirectoryContent.FileMDLocation
 
 	// if doesn't exist in owned files, then create file metadata struct and store in owned files directory
 	if !ok {
@@ -462,10 +513,12 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		fileLocation := uuid.New()
 		fileSourceKey := userlib.RandomBytes(16)
 		fileNumAppends := 0
+		var fileSharedRecipients []string
 
-		fileMetadata = FileMetadata{fileLocation, fileSourceKey, fileNumAppends}
+		fileMetadata = FileMetadata{fileLocation, fileSourceKey, fileNumAppends, fileSharedRecipients}
+		newFileDirectoryContent := FileDirectoryContent{fileMetadataUUID, fileMDSourceKey}
 
-		ownedFilesDir[filename] = fileMetadataUUID
+		ownedFilesDir[filename] = newFileDirectoryContent
 		ownedFilesContent, err := json.Marshal(ownedFilesDir)
 		if err != nil {
 			userlib.DebugMsg("ownedFilesContent could not be marshaled.")
@@ -485,12 +538,15 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		// -- go to filemetadata struct and set numAppends count to 0
 		// -- go to random UUID and set filecontents to input string
 		// -- reset all appends to empty strings
-		ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(userdata.OwnedFilesDirLoc)
+
+		fileMetadataUUID = ownedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = ownedFilesDir[filename].FileMDSourceKey
+		ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(fileMetadataUUID)
 		if err != nil {
 			userlib.DebugMsg("Fetching ciphertext from datastore failed.")
 			return err
 		}
-		contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
+		contentBytes, err := SymmetricTagAndDecrypt(fileMDSourceKey, "storing file metadata", ciphertext, ciphertextMac)
 		if err != nil {
 			userlib.DebugMsg("Symmetric decryption failed.")
 			return err
@@ -510,7 +566,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 	}
 
 	fileMDCiphertext, fileMDCiphertextMAC, err :=
-		SymmetricEncryptAndTag(userSourceKey, "storing file metadata", fileMDContent)
+		SymmetricEncryptAndTag(fileMDSourceKey, "storing file metadata", fileMDContent)
 	if err != nil {
 		userlib.DebugMsg("Symmetric encryption failed.")
 		return err
@@ -542,41 +598,20 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
 	var userSourceKey []byte
-	var ownedFilesDir map[string]uuid.UUID
-	var receivedFilesDir map[string]uuid.UUID
+	var ownedFilesDir map[string]FileDirectoryContent
+	var receivedFilesDir map[string]FileDirectoryContent
 	var fileMetadataUUID uuid.UUID
+	var fileMDSourceKey []byte
 	var fileMetadata FileMetadata
 
 	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
 	// fetch received files directory from datastore
-	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
+	ownedFilesDir, receivedFilesDir, err :=
+		DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
 	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		userlib.DebugMsg("Could not fetch file directories.")
 		return err
 	}
-
-	// check tag and decrypt from datastore
-	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
-		return err
-	}
-	json.Unmarshal(contentBytes, &receivedFilesDir)
-
-	// fetch owned files directory from datastore
-	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
-	if err != nil {
-		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-		return err
-	}
-
-	// check tag and decrypt from datastore
-	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
-	if err != nil {
-		userlib.DebugMsg("Symmetric decryption failed.")
-		return err
-	}
-	json.Unmarshal(contentBytes, &ownedFilesDir)
 
 	// check if filename is in namespace
 	_, inReceivedFilesDir := receivedFilesDir[filename]
@@ -585,18 +620,20 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 		userlib.DebugMsg("Filename not in namespace.")
 		return err
 	} else if inReceivedFilesDir {
-		fileMetadataUUID = receivedFilesDir[filename]
+		fileMetadataUUID = receivedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = receivedFilesDir[filename].FileMDSourceKey
 	} else if inOwnedFilesDir {
-		fileMetadataUUID = ownedFilesDir[filename]
+		fileMetadataUUID = ownedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = ownedFilesDir[filename].FileMDSourceKey
 	}
 
 	// access file metadata and increment number of appends
-	ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore(fileMetadataUUID)
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(fileMetadataUUID)
 	if err != nil {
 		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
 		return err
 	}
-	contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing file metadata", ciphertext, ciphertextMac)
+	contentBytes, err := SymmetricTagAndDecrypt(fileMDSourceKey, "storing file metadata", ciphertext, ciphertextMac)
 	if err != nil {
 		userlib.DebugMsg("Symmetric decryption failed.")
 		return err
@@ -613,7 +650,7 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	}
 
 	fileMDCiphertext, fileMDCiphertextMAC, err :=
-		SymmetricEncryptAndTag(userSourceKey, "storing file metadata", fileMDContent)
+		SymmetricEncryptAndTag(fileMDSourceKey, "storing file metadata", fileMDContent)
 	if err != nil {
 		userlib.DebugMsg("Symmetric encryption failed.")
 		return err
@@ -652,11 +689,12 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	var userSourceKey []byte
-	var ownedFilesDir map[string]uuid.UUID
-	var receivedFilesDir map[string]uuid.UUID
+	var ownedFilesDir map[string]FileDirectoryContent
+	var receivedFilesDir map[string]FileDirectoryContent
 	var fileMetadataUUID uuid.UUID
 	var fileMetadata FileMetadata
 	var thisContent []byte
+	var fileMDSourceKey []byte
 
 	// storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
 	// if err != nil {
@@ -668,38 +706,12 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	// }
 
 	userSourceKey = userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
-	// fetch received files directory from datastore
-	// ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(userdata.ReceivedFilesDirLoc)
-	// if err != nil {
-	// 	userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-	// 	return nil, err
-	// }
 
-	// // check tag and decrypt from datastore
-	// contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing received files directory", ciphertext, ciphertextMac)
-	// if err != nil {
-	// 	userlib.DebugMsg("Symmetric decryption failed.")
-	// 	return nil, err
-	// }
-	// json.Unmarshal(contentBytes, &receivedFilesDir)
-
-	// userlib.DebugMsg("received files directory: %v", receivedFilesDir)
-	// // fetch owned files directory from datastore
-	// ciphertext, ciphertextMac, err = ParseCiphertextandTagFromDatastore((userdata.OwnedFilesDirLoc))
-	// if err != nil {
-	// 	userlib.DebugMsg("Fetching ciphertext from datastore failed.")
-	// 	return nil, err
-	// }
-
-	// // check tag and decrypt from datastore
-	// contentBytes, err = SymmetricTagAndDecrypt(userSourceKey, "storing owned files directory", ciphertext, ciphertextMac)
-	// if err != nil {
-	// 	userlib.DebugMsg("Symmetric decryption failed.")
-	// 	return nil, err
-	// }
-	// json.Unmarshal(contentBytes, &ownedFilesDir)
-	// userlib.DebugMsg("owned files directory: %v", ownedFilesDir)
 	ownedFilesDir, receivedFilesDir, err = DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
+	if err != nil {
+		userlib.DebugMsg("Could not fetch file directories.")
+		return nil, err
+	}
 
 	// check if filename is in namespace
 	_, inReceivedFilesDir := receivedFilesDir[filename]
@@ -708,9 +720,11 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 		userlib.DebugMsg("Filename not in namespace.")
 		return nil, err
 	} else if inReceivedFilesDir {
-		fileMetadataUUID = receivedFilesDir[filename]
+		fileMetadataUUID = receivedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = receivedFilesDir[filename].FileMDSourceKey
 	} else if inOwnedFilesDir {
-		fileMetadataUUID = ownedFilesDir[filename]
+		fileMetadataUUID = ownedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = ownedFilesDir[filename].FileMDSourceKey
 	}
 
 	// access file metadata and symmetric keys for decryption
@@ -719,7 +733,7 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
 		return nil, err
 	}
-	contentBytes, err := SymmetricTagAndDecrypt(userSourceKey, "storing file metadata", ciphertext, ciphertextMac)
+	contentBytes, err := SymmetricTagAndDecrypt(fileMDSourceKey, "storing file metadata", ciphertext, ciphertextMac)
 	if err != nil {
 		userlib.DebugMsg("Symmetric decryption failed.")
 		return nil, err
@@ -777,13 +791,192 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
-	return
+	var fileMetadataUUID uuid.UUID
+	var recipientUserUUID uuid.UUID
+	var recipientPublicKey userlib.PKEEncKey
+	// var invitationContent []byte
+	var invitationUUID uuid.UUID
+	var fileMDSourceKey []byte
+	var fileMetadata FileMetadata
+
+	userSourceKey := userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
+
+	// generate recipient user struct UUID
+	recipientUserUUID, err = uuid.FromBytes(userlib.Hash([]byte(recipientUsername))[:16])
+	if err != nil {
+		userlib.DebugMsg("uuid generation failed.")
+		return uuid.Nil, err
+	}
+
+	// check if recipient UUID already exists in datastore
+	if _, ok := userlib.DatastoreGet(recipientUserUUID); !ok {
+		userlib.DebugMsg("Recipient user does not exist.")
+		return uuid.Nil, err
+	}
+
+	// check if filename exists in namespace
+	ownedFilesDir, receivedFilesDir, err :=
+		DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
+	if err != nil {
+		userlib.DebugMsg("Could not decrypt file directories.")
+		return uuid.Nil, err
+	}
+
+	_, inReceivedFilesDir := receivedFilesDir[filename]
+	_, inOwnedFilesDir := ownedFilesDir[filename]
+	if !inReceivedFilesDir && !inOwnedFilesDir {
+		userlib.DebugMsg("Filename not in namespace.")
+		return uuid.Nil, err
+	} else if inReceivedFilesDir {
+		fileMetadataUUID = receivedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = receivedFilesDir[filename].FileMDSourceKey
+	} else if inOwnedFilesDir {
+		fileMetadataUUID = ownedFilesDir[filename].FileMDLocation
+		fileMDSourceKey = ownedFilesDir[filename].FileMDSourceKey
+	}
+
+	// add recipient to shared list for file metadata
+	ciphertext, ciphertextMac, err := ParseCiphertextandTagFromDatastore(fileMetadataUUID)
+	if err != nil {
+		userlib.DebugMsg("Fetching ciphertext from datastore failed.")
+		return uuid.Nil, err
+	}
+	contentBytes, err :=
+		SymmetricTagAndDecrypt(fileMDSourceKey, "storing file metadata", ciphertext, ciphertextMac)
+	if err != nil {
+		userlib.DebugMsg("Symmetric decryption failed.")
+		return uuid.Nil, err
+	}
+	json.Unmarshal(contentBytes, &fileMetadata)
+
+	// add user to shared recipients
+	fileMetadata.SharedRecipients = append(fileMetadata.SharedRecipients, recipientUsername)
+
+	// re encrypt file metadata
+	datastoreContent, err := json.Marshal(fileMetadata)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	ciphertext, ciphertextMac, err =
+		SymmetricEncryptAndTag(fileMDSourceKey, "storing file metadata", datastoreContent)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	userlib.DatastoreSet(fileMetadataUUID, append(ciphertext, ciphertextMac...))
+
+	// asymmetrically encrypt keys for file metadata
+	recipientPublicKey, ok := userlib.KeystoreGet(recipientUsername + "public key")
+	if !ok {
+		return uuid.Nil, errors.New("no key at this label")
+	}
+
+	contentBytes, err = json.Marshal(append(fileMDSourceKey, fileMetadataUUID[:]...))
+	if err != nil {
+		return uuid.Nil, err
+	}
+	userlib.DebugMsg("length of content %v", len(contentBytes))
+
+	fileMDSourceKeyCiphertext, fileMDSourceKeySignature, err :=
+		AsymmetricEncryptAndSign(recipientPublicKey, userdata.UserSignKey, contentBytes)
+	//userlib.DebugMsg("ciphertext, ciphertextMac are %v, %v", ownedFilesDirCiphertext, ownedFilesDirCiphertextMAC)
+	if err != nil {
+		userlib.DebugMsg("Asymmetric encryption failed.")
+		return uuid.Nil, err
+	}
+
+	invitationUUID = uuid.New()
+	userlib.DatastoreSet(invitationUUID, append(fileMDSourceKeyCiphertext, fileMDSourceKeySignature...))
+
+	// invitation struct contains: symmetric keys for
+	// asymmetrically encrypt location of file metadata in an "invitation"
+	// return UUID of created invitation
+	return invitationUUID, err
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
+	// var fileMDSourceKey []byte
+
+	userSourceKey := userlib.Argon2Key([]byte(userdata.Password), []byte(userdata.Username), 16)
+
+	// check if filename is already in namespace
+	ownedFilesDir, receivedFilesDir, err :=
+		DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
+	if err != nil {
+		userlib.DebugMsg("Could not decrypt file directories.")
+		return err
+	}
+
+	_, inReceivedFilesDir := receivedFilesDir[filename]
+	_, inOwnedFilesDir := ownedFilesDir[filename]
+	if inReceivedFilesDir || inOwnedFilesDir {
+		userlib.DebugMsg("Filename already in namespace.")
+		return err
+	}
+
+	// error if the invitation UUID is invalidated from a revoke
+
+	// asymmetrically verify and decrypt the fileMD source key
+	// errors if invitation UUID is wrong
+	ciphertextPlusSignature, ok := userlib.DatastoreGet(invitationPtr)
+
+	if !ok {
+		userlib.DebugMsg("No content found at this UUID")
+		return errors.New("no content found at this UUID")
+	}
+	ciphertext := ciphertextPlusSignature[0 : len(ciphertextPlusSignature)-256]
+	signature := ciphertextPlusSignature[len(ciphertextPlusSignature)-256:]
+	decKey := userdata.UserPrivateKey
+	verifyKey, ok := userlib.KeystoreGet(senderUsername + "verify key")
+	if !ok {
+		userlib.DebugMsg("No key found at this label.")
+		return errors.New("no key found at this label")
+	}
+
+	contentBytes, err := AsymmetricVerifyAndDecrypt(decKey, verifyKey, ciphertext, signature)
+	if err != nil {
+		userlib.DebugMsg("Asymmetric decryption failed")
+		return err
+	}
+
+	var fileMDSourceKeyPlusUUID []byte
+	err = json.Unmarshal(contentBytes, &fileMDSourceKeyPlusUUID)
+	if err != nil {
+		userlib.DebugMsg("Could not marshal")
+		return err
+	}
+
+	// check if user already accepted invitation by checking if in
+	// add file to namespace with corresponding file directory content
+	fileMetadataUUID := fileMDSourceKeyPlusUUID[len(fileMDSourceKeyPlusUUID)-16:]
+	fileMDSourceKey := fileMDSourceKeyPlusUUID[0 : len(fileMDSourceKeyPlusUUID)-16]
+
+	sharedFileDirContent := FileDirectoryContent{uuid.UUID(fileMetadataUUID), fileMDSourceKey}
+
+	receivedFilesDir[filename] = sharedFileDirContent
+
+	// re-encrypt file directory
+	datastoreContent, err := json.Marshal(receivedFilesDir)
+	if err != nil {
+		return err
+	}
+
+	ciphertext, ciphertextMac, err :=
+		SymmetricEncryptAndTag(userSourceKey, "storing received files directory", datastoreContent)
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(userdata.ReceivedFilesDirLoc, append(ciphertext, ciphertextMac...))
+
+	// ownedFilesDir, receivedFilesDir, _ = DecryptFileDirectories(userSourceKey, userdata.OwnedFilesDirLoc, userdata.ReceivedFilesDirLoc)
+	userlib.DebugMsg("ownedFilesDir: %v, receivedFilesDir: %v", ownedFilesDir, receivedFilesDir)
+
 	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
+
 	return nil
 }

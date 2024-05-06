@@ -118,7 +118,7 @@ var _ = Describe("Client Tests", func() {
 			Expect(data).To(Equal([]byte(contentOne + contentTwo + contentThree)))
 		})
 
-		Specify("Basic Test: Testing Create/Accept Invite Functionality with multiple users and multiple instances.", func() {
+		FSpecify("Basic Test: Testing Create/Accept Invite Functionality with multiple users and multiple instances.", func() {
 			userlib.DebugMsg("Initializing users Alice (aliceDesktop) and Bob.")
 			aliceDesktop, err = client.InitUser("alice", defaultPassword)
 			Expect(err).To(BeNil())
