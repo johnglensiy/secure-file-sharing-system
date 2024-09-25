@@ -1,58 +1,39 @@
-# Project 2 Starter Code
-
-This repository contains the starter code for Project 2!
-
-For comprehensive documentation, see the Project 2 Spec (https://cs161.org/proj2/).
-
-Write your implementation in `client/client.go` and your integration tests in `client_test/client_test.go`. Optionally, you can also use `client/client_unittest.go` to write unit tests (e.g: to test your helper functions).
-
-To test your implementation, run `go test -v` inside of the `client_test` directory. This will run all tests in both `client/client_unittest.go` and `client_test/client_test.go`.
-
-## Project Members
-
-Fill in this section with the student IDs of all the members in your project group.
-
-Partner 1 Name: John Glen Siy
-
-Partner 1 SID:3036909952
-
-Partner 1 Email: johnglen_siy@berkeley.edu
-
-Partner 2 Name (if applicable): Cynthia Lan
-
-Partner 2 SID (if applicable):3035850583
-
-Partner 2 Email (if applicable): cynthialan@berkeley.edu
-
-Also add a link to this repo below (should start with https://github.com/cs161-students/).
-
-Link to this Github repo: https://github.com/cs161-students/sp24-proj2-161-john-cynthia.git
-
 ## Functionality Overview
 
 Implements the following 8 functions:
 
 **InitUser**: Given a new username and password, create a new user.
+
 **GetUser**: Given a username and password, let the user log in if the password is correct.
+
 **User.StoreFile**: For a logged-in user, given a filename and file contents, create a new file or overwrite an existing file.
+
 **User.LoadFile**: For a logged-in user, given a filename, fetch the corresponding file contents.
+
 **User.AppendToFile**: For a logged-in user, given a filename and additional file contents, append the additional file contents at the end of the existing file contents, while following some efficiency requirements.
+
 **User.CreateInvitation**: For a logged-in user, given a filename and target user, generate an invitation UUID that the target user can use to gain access to the file.
+
 **User.AcceptInvitation**: For a logged-in user, given an invitation UUID, obtain access to a file shared by a different user. Allow the recipient user to access the file using a (possibly different) filename of their own choosing.
+
 **User.RevokeAccess**: For a logged-in user, given a filename and target user, revoke the target user’s access so that they are no longer able to access a shared file.
 
+## Threat Model: Datastore Adversary
 
+The Datastore Adversary is an attacker who can read and modify all name-value pairs, and add new name-value pairs, on Datastore. They can modify Datastore at any time (but not in the middle of another function executing).
 
-2.1. Datastore Adversary
-The Datastore is an untrusted service hosted on a server and network controlled by an adversary. The adversary can view and record the content and metadata of all requests (set/get/delete) to the Datastore API. This allows the adversary to know who stored which key-value entry, when, and what the contents are.
+The Datastore Adversary has a global view of Datastore; in other words, they can list out all name-value pairs that currently exist on Datastore.
 
-The adversary can add new key-value entries at any time and can modify any existing key-value entry. However, the Datastore will never execute a rollback attack (full or partial).
+The Datastore Adversary can take snapshots of Datastore at any time. For example, they could write down all existing name-value pairs before a user calls StoreFile. Then, they could write down all existing name-value pairs after a user calls StoreFile and compare the difference to see which name-value pairs changed as a result of the function call.
 
-The Datastore will not launch any Denial of Service (DoS) attacks. However, assume that it implements a rate-limiting scheme which prevents a user from enumerating the key/value pairs in the Datastore.
+The Datastore Adversary can see when a user calls a function (e.g. if a user calls StoreFile, they know which user called it and when).
 
-2.2. Revoked User Adversary
-Assume that each user records all of the requests that their client makes to Datastore and the corresponding responses.
+The Datastore Adversary can view and record the content and metadata of all requests to the Datastore API. This means that they will know what the inputs and outputs to the functions are.
 
-A user who is granted access to a file is considered trusted and will only use their client to interact with Datastore. However, after a user has their access to a shared file revoked, that user may become malicious, ignore your client implementation, and use the Datastore API directly.
+The Datastore Adversary is not a user in the system, and will not collude with other users. However, the Datastore Adversary has a copy of your source code (Kerckhoff’s principle), and they could execute lines of your code on their own in order to modify Datastore in a way that mimics your code’s behavior.
 
-Malicious users could try to perform operations on arbitrary files by utilizing the request/response information that they recorded before their access was revoked. All writes to Datastore made by a user in an attempt to modify file content or re-acquire access to file are malicious actions.
+The Datastore adversary will not perform any rollback attacks: Given a specific UUID, they will not read the value at that UUID, and then later replace the value at that UUID with the older value they read. (Deleting a value at a UUID is not a rollback attack.)
+
+They will also not perform any rollback attacks on multiple UUIDs. For example, they will not revert the entire contents of Datastore to some previous snapshot of Datastore they took.
+
+their access was revoked. All writes to Datastore made by a user in an attempt to modify file content or re-acquire access to file are malicious actions.
